@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>수난사고 구조출동 타임라인 (분 단위)</title>
+<link rel="preconnect" href="https://cdn.jsdelivr.net">
+<style>
+  :root {
+    --bg: #0f1115;
+    --card: #151923;
+    --text: #e6e6e6;
+    --muted: #9aa4b2;
+    --grid: #263040;
+    --axis: #4b5563;
+    --accent: #60a5fa;
+    --stroke: #10141c;
+    --rowHover: rgba(96,165,250,0.07);
+  }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, Apple Color Emoji, Segoe UI Emoji, Noto Color Emoji;
+  }
+  .container {
+    display: grid;
+    grid-template-rows: auto auto 1fr;
+    height: 100%;
+    gap: 8px;
+    padding: 16px;
+    box-sizing: border-box;
+  }
+  .controls, .legend, .status {
+    background: var(--card);
+    border: 1px solid var(--stroke);
+    border-radius: 10px;
+    padding: 12px;
+  }
+  .controls label {
+    margin-right: 12px;
+    font-size: 14px;
+    color: var(--muted);
+  }
+  .controls input[type="file"] {
+    padding: 6px 8px;
+    background: #0e121a;
+    border: 1px solid #232a36;
+    border-radius: 8px;
+    color: var(--text);
+  }
+  .controls input[type="range"] {
+    width: 200px;
+    vertical-align: middle;
+  }
+  .legend {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    font-size: 14px;
+    color: var(--muted);
+  }
+  .swatch { width: 12px; height: 12px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+  .swatch 신고 { background: #3b82f6; }
+  .swatch 출동 { background: #f59e0b; }
+  .swatch 구조 { background: #10b981; }
+  .swatch 복귀 { background: #ef4444; }
+  .canvas-wrap {
+    position: relative;
+    background: #0b0f16;
+    border: 1px solid var(--stroke);
+    border-radius: 10px;
+    overflow: auto;
+  }
+  #timelineCanvas { display: block; }
+  .axisTop {
+    position: sticky;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 30px;
+    background: linear-gradient(#0b0f16, rgba(11,15,22,0.85));
+    border-bottom: 1px solid var(--stroke);
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    padding: 0 8px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .status { font-size: 13px; color: var(--muted); }
+  .hint { color: var(--muted); font-size: 12px; }
+  .btn {
+    padding: 6px 10px;
+    background: #1e293b;
+    color: var(--text);
+    border: 1px solid #2a3445;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .btn:hover { background: #233048; }
+</style>
+</head>
+<body>
+  <div class="container">
+    <div class="controls">
+      <label>
+        CSV 불러오기:
+        <input id="fileInput" type="file" accept=".csv" />
+      </label>
+      <label>
+        분 스케일(px):
+        <input id="scaleInput" type="range" min="2" max="20" value="6" />
+        <span id="scaleVal">6</span>
+      </label>
+      <label>
+        행 높이(px):
+        <input id="rowInput" type="range" min="12" max="32" value="18" />
+        <span id="rowVal">18</span>
+      </label>
+      <button id="fitBtn" class="btn">폭 자동 맞춤</button>
+      <span class="hint">같은 폴더의 CSV를 선택하세요: ‘수난사고_구조출동_2023_한강_수정본.csv’</span>
+    </div>
+
+    <div class="legend">
+      <div><span class="swatch 신고"></span>신고</div>
+      <div><span class="swatch 출동"></span>출동</div>
+      <div><span class="swatch 구조"></span>구조</div>
+      <div><span class="swatch 복귀"></span>복귀</div>
+      <div>| 세로: 사건 순서, 가로: 분</div>
+    </div>
+
+    <div class="canvas-wrap" id="canvasWrap">
+      <div class="axisTop" id="axisTop">분 눈금은 10분 간격으로 표시됩니다.</div>
+      <canvas id="timelineCanvas"></canvas>
+    </div>
+
+    <div class="status" id="status">대기 중… CSV를 선택해주세요.</div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script>
+    const fileInput = document.getElementById('fileInput');
+    const scaleInput = document.getElementById('scaleInput');
+    const rowInput = document.getElementById('rowInput');
+    const scaleVal = document.getElementById('scaleVal');
+    const rowVal = document.getElementById('rowVal');
+    const statusEl = document.getElementById('status');
+    const fitBtn = document.getElementById('fitBtn');
+
+    const canvas = document.getElementById('timelineCanvas');
+    const ctx = canvas.getContext('2d');
+    const wrap = document.getElementById('canvasWrap');
+
+    const COLORS = {
+      신고: '#3b82f6',
+      출동: '#f59e0b',
+      구조: '#10b981',
+      복귀: '#ef4444',
+      grid: '#1f2a3a',
+      gridBold: '#2b3648',
+      axis: '#64748b'
+    };
+
+    let records = [];
+    let minuteScale = parseInt(scaleInput.value, 10);
+    let rowHeight = parseInt(rowInput.value, 10);
+
+    scaleInput.addEventListener('input', () => {
+      minuteScale = parseInt(scaleInput.value, 10);
+      scaleVal.textContent = minuteScale;
+      draw();
+    });
+    rowInput.addEventListener('input', () => {
+      rowHeight = parseInt(rowInput.value, 10);
+      rowVal.textContent = rowHeight;
+      draw();
+    });
+    fitBtn.addEventListener('click', () => {
+      const maxMin = getMaxMinutes(records);
+      if (!maxMin) return;
+      const pad = 120; // px padding for right side
+      const newScale = Math.max(2, Math.floor((wrap.clientWidth - pad) / (maxMin + 5)));
+      minuteScale = newScale;
+      scaleInput.value = String(newScale);
+      scaleVal.textContent = newScale;
+      draw();
+    });
+
+    fileInput.addEventListener('change', (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      statusEl.textContent = 'CSV 읽는 중…';
+      Papa.parse(file, {
+        header: true,
+        skipEmptyLines: true,
+        complete: (res) => {
+          const data = res.data || [];
+          records = preprocess(data);
+          statusEl.textContent = `총 ${records.length}건 로드됨`;
+          draw();
+        },
+        error: (err) => {
+          statusEl.textContent = `파싱 오류: ${err && err.message ? err.message : err}`;
+        }
+      });
+    });
+
+    function preprocess(rows) {
+      // 기대 컬럼: 사건, 신고, 출동, 구조, 복귀 (각각 기간, 예: 0:03, 5:17)
+      // 가로축은 0분에서 시작해 신고→출동→구조→복귀 구간을 누적 막대로 표현
+      const out = [];
+      for (const row of rows) {
+        const id = (row['사건'] || '').trim();
+        if (!id) continue;
+
+        const durReportToDispatch = parseHm(row['신고']);   // 신고→출동
+        const durDispatchToRescue  = parseHm(row['출동']);   // 출동→구조완료(또는 구조 단계 시작까지)
+        const durRescueToReturn    = parseHm(row['구조']);   // 구조→복귀 전까지
+        const durReturnTail        = parseHm(row['복귀']);   // 복귀 마무리(있다면)
+
+        // 누적 시작점 계산
+        let cursor = 0;
+        const segments = [];
+        if (isFiniteNum(durReportToDispatch) && durReportToDispatch > 0) {
+          segments.push({ label: '신고', start: cursor, duration: durReportToDispatch });
+          cursor += durReportToDispatch;
+        } else {
+          segments.push({ label: '신고', start: cursor, duration: 0 });
+        }
+        if (isFiniteNum(durDispatchToRescue) && durDispatchToRescue > 0) {
+          segments.push({ label: '출동', start: cursor, duration: durDispatchToRescue });
+          cursor += durDispatchToRescue;
+        }
+        if (isFiniteNum(durRescueToReturn) && durRescueToReturn > 0) {
+          segments.push({ label: '구조', start: cursor, duration: durRescueToReturn });
+          cursor += durRescueToReturn;
+        }
+        if (isFiniteNum(durReturnTail) && durReturnTail > 0) {
+          segments.push({ label: '복귀', start: cursor, duration: durReturnTail });
+          cursor += durReturnTail;
+        }
+
+        const total = cursor; // 총 소요 분
+        out.push({ id, segments, total });
+      }
+      // 사건순 정렬 (숫자 ID 기준)
+      out.sort((a, b) => {
+        const na = Number(a.id) || 0;
+        const nb = Number(b.id) || 0;
+        return na - nb;
+      });
+      return out;
+    }
+
+    function parseHm(v) {
+      if (v == null) return null;
+      const s = String(v).trim();
+      if (!s) return null;
+      // 형식: H:MM 또는 MM (가끔 0:03, 5:17 등)
+      const m = s.match(/^(\d+):(\d{2})$/);
+      if (m) {
+        const h = parseInt(m[1], 10);
+        const mm = parseInt(m[2], 10);
+        if (Number.isFinite(h) && Number.isFinite(mm)) return h * 60 + mm;
+        return null;
+      }
+      const onlyMin = s.match(/^(\d+)$/);
+      if (onlyMin) {
+        const mm = parseInt(onlyMin[1], 10);
+        return Number.isFinite(mm) ? mm : null;
+      }
+      return null;
+    }
+
+    function isFiniteNum(n) {
+      return typeof n === 'number' && Number.isFinite(n);
+    }
+
+    function getMaxMinutes(data) {
+      let maxVal = 0;
+      for (const r of data) {
+        const v = r.total || 0;
+        if (typeof v === 'number' && v > maxVal) maxVal = v;
+      }
+      return maxVal;
+    }
+
+    function draw() {
+      const DPR = Math.max(1, Math.floor(window.devicePixelRatio || 1));
+      const count = records.length;
+      const topAxisH = 30; // sticky axis height
+      const vPad = 12; // vertical padding in canvas
+      const hPadLeft = 60; // left padding for row index labels
+      const hPadRight = 20;
+
+      const maxMin = Math.max(60, getMaxMinutes(records));
+      const widthCss = hPadLeft + (maxMin + 5) * minuteScale + hPadRight;
+      const heightCss = topAxisH + vPad + count * rowHeight + vPad;
+
+      canvas.style.width = widthCss + 'px';
+      canvas.style.height = heightCss + 'px';
+      canvas.width = Math.floor(widthCss * DPR);
+      canvas.height = Math.floor(heightCss * DPR);
+
+      ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+      // clear
+      ctx.fillStyle = '#0b0f16';
+      ctx.fillRect(0, 0, widthCss, heightCss);
+
+      // axis background (under sticky header area)
+      ctx.fillStyle = '#0b0f16';
+      ctx.fillRect(0, 0, widthCss, topAxisH);
+
+      // vertical grid lines every 10 minutes and bold every 60 minutes
+      const gridTop = topAxisH;
+      const gridBottom = heightCss;
+
+      for (let m = 0; m <= maxMin + 5; m += 10) {
+        const x = hPadLeft + m * minuteScale + 0.5;
+        ctx.strokeStyle = (m % 60 === 0) ? COLORS.gridBold : COLORS.grid;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x, gridTop);
+        ctx.lineTo(x, gridBottom);
+        ctx.stroke();
+      }
+
+      // top axis labels every 10 minutes
+      ctx.fillStyle = COLORS.axis;
+      ctx.textBaseline = 'middle';
+      ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial';
+      for (let m = 0; m <= maxMin + 5; m += 10) {
+        const x = hPadLeft + m * minuteScale + 3;
+        ctx.fillText(`${m}분`, x, topAxisH / 2);
+      }
+
+      // draw rows
+      const yStart = topAxisH + vPad;
+
+      ctx.lineWidth = 1.5;
+
+      for (let i = 0; i < count; i++) {
+        const r = records[i];
+        const y = yStart + i * rowHeight + Math.floor(rowHeight / 2);
+
+        // left index label background guide (optional alternating row highlight)
+        if (i % 2 === 1) {
+          ctx.fillStyle = 'rgba(96,165,250,0.03)';
+          ctx.fillRect(0, y - rowHeight / 2, widthCss, rowHeight);
+        }
+
+        // row index (사건번호)
+        ctx.fillStyle = '#9aa4b2';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(r.id), hPadLeft - 8, y);
+
+        // draw stacked segments
+        if (Array.isArray(r.segments)) {
+          for (const seg of r.segments) {
+            const color = COLORS[seg.label] || '#6b7280';
+            const x1 = hPadLeft + seg.start * minuteScale;
+            const x2 = hPadLeft + (seg.start + seg.duration) * minuteScale;
+            const barH = Math.max(6, Math.min(rowHeight - 4, 10));
+            const yTop = y - Math.floor(barH / 2);
+
+            // bar
+            ctx.fillStyle = color;
+            ctx.fillRect(x1, yTop, Math.max(1, x2 - x1), barH);
+
+            // border
+            ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+            ctx.strokeRect(x1 + 0.5, yTop + 0.5, Math.max(1, x2 - x1) - 1, barH - 1);
+          }
+        }
+      }
+
+      // update sticky top axis text
+      const maxMinText = getMaxMinutes(records);
+      document.getElementById('axisTop').textContent = `가로축: 분 (0분=사건 시작). 눈금: 10분, 최대 표시 약 ${maxMinText}분`;
+    }
+
+    // Try to auto-fit after container layout is stable
+    const ro = new ResizeObserver(() => draw());
+    ro.observe(document.body);
+  </script>
+</body>
+</html>
