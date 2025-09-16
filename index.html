@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>한강 수난사고 처리시간 시각화</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif; margin: 0; color: #111; }
+    header { padding: 16px; border-bottom: 1px solid #eee; }
+    header h1 { font-size: 18px; margin: 0 0 6px; }
+    header p { margin: 4px 0; color: #555; font-size: 13px; }
+    #controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+    /* 표(차트) 영역 내부 스크롤을 없애고, 페이지 전체 스크롤로 이동 */
+    #chart { border-top: 1px solid #eee; }
+    .legend { display: flex; gap: 12px; font-size: 13px; color: #333; align-items: center; }
+    .legend-item { display: inline-flex; align-items: center; gap: 6px; }
+    .swatch { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
+    .tooltip { position: absolute; pointer-events: none; background: rgba(0,0,0,0.75); color: #fff; padding: 6px 8px; border-radius: 4px; font-size: 12px; transform: translate(-50%, -120%); white-space: nowrap; z-index: 10; }
+    .axis path, .axis line { stroke: #aaa; }
+    .y-axis .tick text { font-size: 10px; fill: #666; }
+    .x-axis .tick text { font-size: 11px; fill: #333; }
+    .row-line { stroke: #ddd; }
+    /* x축을 항상 보이게 하는 고정 바 */
+    #sticky-axis { position: sticky; bottom: 0; background: #fff; border-top: 1px solid #eee; z-index: 5; }
+    /* 높이를 키워 눈금 라벨이 잘리지 않도록 공간 확보 */
+    #sticky-axis svg { display: block; width: 100%; height: 56px; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+</head>
+<body>
+  <header>
+    <h1>한강 수난사고 처리 과정 시간(분) 시각화</h1>
+    <p>세로축: 사건, 가로축: 분. 동일 사건의 출동/도착/구조/복귀를 한 줄에 서로 다른 색 점으로 표시합니다.</p>
+    <div id="controls">
+      <div class="legend">
+        <span class="legend-item"><span class="swatch" style="background:#d62728"></span>출동</span>
+        <span class="legend-item"><span class="swatch" style="background:#ff7f0e"></span>도착</span>
+        <span class="legend-item"><span class="swatch" style="background:#1f77b4"></span>구조</span>
+        <span class="legend-item"><span class="swatch" style="background:#9467bd"></span>복귀</span>
+      </div>
+      <button id="fitBtn">가로축 전체보기</button>
+    </div>
+  </header>
+
+  <div id="chart"></div>
+  <div id="sticky-axis"><svg><g class="x-axis axis"></g></svg></div>
+  <div id="tooltip" class="tooltip" style="display:none;"></div>
+
+  <script>
+  (function() {
+    const csvFileName = "수난사고_구조출동_2023_한강_수정본.csv"; // 같은 폴더의 CSV
+
+    const margin = { top: 20, right: 24, bottom: 30, left: 60 };
+    const rowHeight = 6;   // 한 사건당 세로 높이
+    const pointRadius = 2.2;
+    // 색상 매핑: 출동=빨강, 도착=주황, 구조=파랑, 복귀=보라
+    const colors = { 출동: "#d62728", 도착: "#ff7f0e", 구조: "#1f77b4", 복귀: "#9467bd" };
+
+    const container = d3.select('#chart');
+    const tooltip = d3.select('#tooltip');
+
+    // "m:ss" 또는 "mm:ss"를 분 단위 실수로 변환
+    function parseToMinutes(value) {
+      if (value == null) return null;
+      const s = String(value).trim();
+      if (!s) return null;
+      const parts = s.split(":").map(Number);
+      if (parts.length !== 2 || parts.some(Number.isNaN)) return null;
+      const minutes = parts[0];
+      const seconds = parts[1];
+      return minutes + (seconds / 60);
+    }
+
+    function tidyData(rows) {
+      const data = rows.map(d => ({
+        사건: +d["사건"],
+        출동: parseToMinutes(d["신고"]),
+        도착: parseToMinutes(d["출동"]),
+        구조: parseToMinutes(d["구조"]),
+        복귀: parseToMinutes(d["복귀"]),
+        신고시각: d["신고시각"],
+        출동시각: d["출동시각"],
+        현장도착시각: d["현장도착시각"],
+        구조완료시각: d["구조완료시각"],
+        복귀시각: d["복귀시각"],
+        계절명: d["계절명"],
+        사고원인명: d["사고원인명"],
+        현장시군구명: d["현장시군구명"],
+        소방서명: d["소방서명"]
+      })).filter(d => !Number.isNaN(d.사건));
+      data.sort((a,b) => a.사건 - b.사건);
+      return data;
+    }
+
+    function render(data) {
+      container.selectAll('*').remove();
+
+      const numRows = data.length;
+      const height = margin.top + margin.bottom + Math.max(200, numRows * rowHeight);
+      const width = Math.max(900, container.node().clientWidth || 900);
+
+      const svg = container.append('svg')
+        .attr('width', width)
+        .attr('height', height);
+
+      const plot = svg.append('g')
+        .attr('transform', `translate(${margin.left},${margin.top})`);
+
+      // 행 하이라이트 박스 (호버 시 해당 사건 행 확대 효과)
+      const hoverRow = plot.append('rect')
+        .attr('class', 'hover-row')
+        .attr('x', 0)
+        .attr('width', width - margin.left - margin.right)
+        .attr('fill', 'rgba(0,0,0,0.05)')
+        .attr('rx', 3)
+        .style('display', 'none');
+
+      // 누적 시간 계산 헬퍼 (모든 가로 값이 출동→도착→구조→복귀 순으로 좌->우 정렬)
+      function cumulativeTimes(d) {
+        const a = d.출동 ?? null;
+        const b = d.도착 ?? null;
+        const c = d.구조 ?? null;
+        const e = d.복귀 ?? null;
+        const cum = { 출동: null, 도착: null, 구조: null, 복귀: null };
+        if (a != null) cum.출동 = a;
+        if (cum.출동 != null && b != null) cum.도착 = cum.출동 + b; else if (b != null && cum.출동 == null) cum.도착 = b; // 최소한의 견고성
+        if (cum.도착 != null && c != null) cum.구조 = cum.도착 + c; else if (c != null && cum.도착 == null) cum.구조 = (cum.출동 ?? 0) + c;
+        if (cum.구조 != null && e != null) cum.복귀 = cum.구조 + e; else if (e != null && cum.구조 == null) cum.복귀 = (cum.도착 ?? cum.출동 ?? 0) + e;
+        return cum;
+      }
+
+      const allTimes = [];
+      for (const d of data) {
+        const cum = cumulativeTimes(d);
+        if (cum.출동 != null) allTimes.push(cum.출동);
+        if (cum.도착 != null) allTimes.push(cum.도착);
+        if (cum.구조 != null) allTimes.push(cum.구조);
+        if (cum.복귀 != null) allTimes.push(cum.복귀);
+      }
+      const xMax = d3.max(allTimes) ?? 1;
+
+      const x = d3.scaleLinear()
+        .domain([0, xMax * 1.05])
+        .range([0, width - margin.left - margin.right]);
+
+      const y = d3.scaleBand()
+        .domain(data.map(d => d.사건))
+        .range([0, height - margin.top - margin.bottom])
+        .paddingInner(0.6)
+        .paddingOuter(0.1);
+
+      const xAxis = d3.axisBottom(x).ticks(10).tickFormat(d => d + "분");
+      const yAxis = d3.axisLeft(y).tickValues(y.domain().filter((_, i) => (i % 20) === 0));
+
+      // 각 사건 라인 (최소~최대 시간 구간)
+      const groups = plot.append('g');
+      groups.selectAll('line.row-line')
+        .data(data)
+        .join('line')
+        .attr('class', 'row-line')
+        .attr('x1', d => {
+          const cum = cumulativeTimes(d);
+          const arr = [0, cum.출동, cum.도착, cum.구조, cum.복귀].filter(v => v != null);
+          return arr.length ? x(d3.min(arr)) : x(0);
+        })
+        .attr('x2', d => {
+          const cum = cumulativeTimes(d);
+          const arr = [0, cum.출동, cum.도착, cum.구조, cum.복귀].filter(v => v != null);
+          return arr.length ? x(d3.max(arr)) : x(0);
+        })
+        .attr('y1', d => (y(d.사건) ?? 0) + y.bandwidth() / 2)
+        .attr('y2', d => (y(d.사건) ?? 0) + y.bandwidth() / 2)
+        .attr('stroke-width', 1);
+
+      // 선분 그리기 helper: 시작값(startMin)과 끝값(endMin) (분)으로 같은 사건 라인에 색상 선분
+      function drawSegments(getStartEnd, label, color) {
+        const segs = [];
+        for (const d of data) {
+          const s = getStartEnd(d);
+          if (s && s.start != null && s.end != null) {
+            segs.push({ 사건: d.사건, start: s.start, end: s.end });
+          }
+        }
+        plot.append('g')
+          .selectAll('line')
+          .data(segs)
+          .join('line')
+          .attr('class', 'seg')
+          .attr('x1', d => x(d.start))
+          .attr('x2', d => x(d.end))
+          .attr('y1', d => (y(d.사건) ?? 0) + y.bandwidth() / 2)
+          .attr('y2', d => (y(d.사건) ?? 0) + y.bandwidth() / 2)
+          .attr('stroke', color)
+          .attr('stroke-width', 3)
+          .attr('stroke-linecap', 'round')
+          .attr('data-case', d => d.사건)
+          .on('mouseenter', function(event, d){
+            const duration = Math.max(0, d.end - d.start);
+            const mm = Math.floor(duration);
+            const ss = Math.round((duration - mm) * 60);
+            
+            // 해당 사건의 원본 데이터 찾기
+            const incidentData = data.find(item => item.사건 === d.사건);
+            
+            let tooltipContent = `사건 ${d.사건}<br>${label}: ${duration.toFixed(2)}분 (≈ ${mm}:${String(ss).padStart(2,'0')})`;
+            
+            if (incidentData) {
+              tooltipContent += '<br><br>';
+              if (incidentData.계절명) tooltipContent += `계절: ${incidentData.계절명}<br>`;
+              if (incidentData.사고원인명) tooltipContent += `사고원인: ${incidentData.사고원인명}<br>`;
+              if (incidentData.현장시군구명) tooltipContent += `현장지역: ${incidentData.현장시군구명}<br>`;
+              if (incidentData.소방서명) tooltipContent += `소방서: ${incidentData.소방서명}`;
+              
+              tooltipContent += '<br>';
+              if (incidentData.신고시각) tooltipContent += `신고시각: ${incidentData.신고시각}<br>`;
+              if (incidentData.출동시각) tooltipContent += `출동시각: ${incidentData.출동시각}<br>`;
+              if (incidentData.현장도착시각) tooltipContent += `현장도착시각: ${incidentData.현장도착시각}<br>`;
+              if (incidentData.구조완료시각) tooltipContent += `구조완료시각: ${incidentData.구조완료시각}<br>`;
+              if (incidentData.복귀시각) tooltipContent += `복귀시각: ${incidentData.복귀시각}`;
+            }
+            
+            tooltip.style('display', 'block')
+              .html(tooltipContent);
+
+            // 해당 사건 행 확대 효과: 배경 박스 표시 및 선 두께 강조
+            const y0 = (y(d.사건) ?? 0);
+            const pad = Math.max(6, y.bandwidth() * 0.6);
+            hoverRow
+              .attr('y', Math.max(0, y0 - (pad - y.bandwidth()) / 2))
+              .attr('height', y.bandwidth() + (pad - y.bandwidth()))
+              .style('display', 'block');
+            // 같은 사건의 세그먼트 선 두께 증가
+            plot.selectAll('line.seg')
+              .filter(s => s.사건 === d.사건)
+              .attr('stroke-width', 7);
+            // 가이드라인도 강조
+            plot.selectAll('line.row-line')
+              .filter(r => r.사건 === d.사건)
+              .attr('stroke-width', 2);
+          })
+          .on('mousemove', function(event){
+            tooltip.style('left', (event.pageX) + 'px')
+                   .style('top', (event.pageY - 10) + 'px');
+          })
+          .on('mouseleave', function(){
+            tooltip.style('display', 'none');
+            hoverRow.style('display', 'none');
+            // 원복
+            plot.selectAll('line.seg').attr('stroke-width', 3);
+            plot.selectAll('line.row-line').attr('stroke-width', 1);
+          });
+      }
+
+      // 구간: 출동, 도착, 구조, 복귀 (누적 좌표 사용)
+      drawSegments(d => {
+        const cum = cumulativeTimes(d);
+        return cum.출동 != null ? { start: 0, end: cum.출동 } : null;
+      }, '출동', colors.출동);
+      drawSegments(d => {
+        const cum = cumulativeTimes(d);
+        return (cum.출동 != null && cum.도착 != null) ? { start: cum.출동, end: cum.도착 } : null;
+      }, '도착', colors.도착);
+      drawSegments(d => {
+        const cum = cumulativeTimes(d);
+        return (cum.도착 != null && cum.구조 != null) ? { start: cum.도착, end: cum.구조 } : null;
+      }, '구조', colors.구조);
+      drawSegments(d => {
+        const cum = cumulativeTimes(d);
+        return (cum.구조 != null && cum.복귀 != null) ? { start: cum.구조, end: cum.복귀 } : null;
+      }, '복귀', colors.복귀);
+
+      // 고정된 하단 x축 초기 렌더링
+      const stickySvg = d3.select('#sticky-axis svg');
+      stickySvg.select('.x-axis')
+        .attr('transform', `translate(${margin.left},${34})`)
+        .call(xAxis);
+
+      plot.append('g')
+        .attr('class', 'y-axis axis')
+        .call(yAxis);
+
+      // 줌/패닝 (가로축)
+      const zoom = d3.zoom()
+        .scaleExtent([1, 20])
+        .translateExtent([[0,0],[width, height]])
+        .on('zoom', (event) => {
+          const k = Math.max(1, event.transform.k);
+          const baseMax = x.domain()[1];
+          const zx = d3.scaleLinear()
+            .domain([0, baseMax / k])
+            .range(x.range());
+          plot.selectAll('line.row-line')
+            .attr('x1', d => {
+              const cum = cumulativeTimes(d);
+              const arr = [0, cum.출동, cum.도착, cum.구조, cum.복귀].filter(v => v != null);
+              return arr.length ? zx(d3.min(arr)) : zx(0);
+            })
+            .attr('x2', d => {
+              const cum = cumulativeTimes(d);
+              const arr = [0, cum.출동, cum.도착, cum.구조, cum.복귀].filter(v => v != null);
+              return arr.length ? zx(d3.max(arr)) : zx(0);
+            });
+          // 선분 위치 업데이트 (줌)
+          plot.selectAll('line.seg')
+            .attr('x1', function(d){ return zx(d.start); })
+            .attr('x2', function(d){ return zx(d.end); });
+          d3.select('#sticky-axis .x-axis').call(d3.axisBottom(zx).ticks(10).tickFormat(d => d + "분"));
+        });
+
+      // 차트 영역에서 스크롤하면 확대/축소가 되도록 컨테이너에 줌을 부착
+      const chartSel = d3.select('#chart');
+      chartSel.call(zoom);
+      // 초기 상태: 최대 배율로 확대
+      const maxK = 20; // scaleExtent 상한
+      chartSel.call(zoom.transform, d3.zoomIdentity.scale(maxK));
+
+      d3.select('#fitBtn').on('click', () => {
+        d3.select('#chart').transition().duration(400).call(zoom.transform, d3.zoomIdentity);
+      });
+    }
+
+    function loadDefaultCsv() {
+      d3.csv(csvFileName).then(rows => {
+        const data = tidyData(rows);
+        render(data);
+      }).catch(err => {
+        console.warn('기본 CSV 로드 실패. 파일 입력으로 대체합니다.', err);
+      });
+    }
+
+    loadDefaultCsv();
+  })();
+  </script>
+</body>
+</html>
